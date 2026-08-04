@@ -1,0 +1,12 @@
+# SwiftPM build products
+.build/
+.swiftpm/
+Package.resolved
+
+# Hand-assembled app bundle from build.sh
+build/
+
+# macOS / Xcode
+.DS_Store
+xcuserdata/
+*.xcuserstate
