@@ -1,5 +1,7 @@
 import SwiftUI
+import UniformTypeIdentifiers
 import CoreKit
+import AppCore
 
 /// One half of the dual-pane explorer.
 ///
@@ -12,10 +14,17 @@ struct FilePaneView: View {
     let items: [FileItem]
     @Binding var selection: Set<String>
     let isBusy: Bool
+    /// Which pane this is — drags are tagged with it so a drop can tell where
+    /// the items came from and ignore drags that started in this same pane.
+    let side: PaneSide
+    let acceptsDrops: Bool
 
     var onGoUp: () -> Void
     var onOpen: (FileItem) -> Void
     var onRefresh: () -> Void
+    var onDropNames: ([String]) -> Void
+
+    @State private var isDropTargeted = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -57,6 +66,7 @@ struct FilePaneView: View {
                     .tag(item.name)
                     .contentShape(Rectangle())
                     .onTapGesture(count: 2) { onOpen(item) }
+                    .onDrag { dragProvider(for: item) }
             }
         }
         .listStyle(.inset)
@@ -66,6 +76,42 @@ struct FilePaneView: View {
                     .foregroundStyle(.secondary)
             }
         }
+        .overlay {
+            if isDropTargeted {
+                RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(Color.accentColor, lineWidth: 2)
+                    .padding(2)
+                    .allowsHitTesting(false)
+            }
+        }
+        .onDrop(of: [.text], isTargeted: acceptsDrops ? $isDropTargeted : .constant(false)) { providers in
+            guard acceptsDrops else { return false }
+            return handleDrop(providers)
+        }
+    }
+
+    /// Dragging a row drags the whole selection when the row is part of it,
+    /// which is what a file manager is expected to do.
+    private func dragProvider(for item: FileItem) -> NSItemProvider {
+        let names = selection.contains(item.name) ? Array(selection) : [item.name]
+        let payload = ([side.rawValue] + names).joined(separator: "\n")
+        return NSItemProvider(object: payload as NSString)
+    }
+
+    private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
+        for provider in providers {
+            _ = provider.loadObject(ofClass: NSString.self) { object, _ in
+                guard let payload = object as? String else { return }
+                var lines = payload.components(separatedBy: "\n")
+                guard let origin = lines.first, !lines.isEmpty else { return }
+                lines.removeFirst()
+                // Ignore drags that started in this pane — dropping a pane onto
+                // itself should do nothing rather than transfer in a loop.
+                guard origin != side.rawValue, !lines.isEmpty else { return }
+                Task { @MainActor in onDropNames(lines) }
+            }
+        }
+        return true
     }
 
     private func row(_ item: FileItem) -> some View {

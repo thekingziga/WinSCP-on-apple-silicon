@@ -13,7 +13,16 @@ struct ContentView: View {
             Divider()
             transferBar
             Divider()
-            logView
+            HSplitView {
+                TransferQueueView(queue: model.queue) {
+                    Task { await model.retryFailedTransfers() }
+                }
+                .frame(minWidth: 320, idealWidth: 480)
+
+                logView
+                    .frame(minWidth: 260)
+            }
+            .frame(height: 170)
         }
         .frame(minWidth: 980, minHeight: 620)
         .toolbar { toolbarContent }
@@ -35,9 +44,14 @@ struct ContentView: View {
                 items: model.localItems,
                 selection: $model.localSelection,
                 isBusy: model.isBusy,
+                side: .local,
+                acceptsDrops: model.isConnected,
                 onGoUp: { model.localGoUp() },
                 onOpen: { model.enterLocal($0) },
-                onRefresh: { model.refreshLocal() }
+                onRefresh: { model.refreshLocal() },
+                onDropNames: { names in
+                    model.enqueueTransfer(names: names, direction: .download)
+                }
             )
             .frame(minWidth: 380)
 
@@ -47,9 +61,14 @@ struct ContentView: View {
                 items: model.remoteItems,
                 selection: $model.remoteSelection,
                 isBusy: model.isBusy,
+                side: .remote,
+                acceptsDrops: model.isConnected,
                 onGoUp: { Task { await model.remoteGoUp() } },
                 onOpen: { item in Task { await model.enterRemote(item) } },
-                onRefresh: { Task { await model.refreshRemote() } }
+                onRefresh: { Task { await model.refreshRemote() } },
+                onDropNames: { names in
+                    model.enqueueTransfer(names: names, direction: .upload)
+                }
             )
             .frame(minWidth: 380)
             .disabled(!model.isConnected)
@@ -62,7 +81,7 @@ struct ContentView: View {
     private var transferBar: some View {
         HStack(spacing: 12) {
             Button {
-                Task { await model.uploadSelected() }
+                model.uploadSelected()
             } label: {
                 Label("Upload", systemImage: "arrow.right")
             }
@@ -70,7 +89,7 @@ struct ContentView: View {
             .help("Copy the selected local files to the remote directory")
 
             Button {
-                Task { await model.downloadSelected() }
+                model.downloadSelected()
             } label: {
                 Label("Download", systemImage: "arrow.left")
             }
@@ -119,7 +138,6 @@ struct ContentView: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
             }
-            .frame(height: 110)
             .onChange(of: model.log.count) { _, _ in
                 if let last = model.log.last {
                     withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }

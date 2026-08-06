@@ -322,25 +322,47 @@ public actor SFTPClient {
     }
 
     /// Download a remote file to a local URL.
+    ///
+    /// With `resume: true`, an existing local file is treated as a partial
+    /// transfer and the download restarts at its current length. As in WinSCP,
+    /// this assumes the existing bytes match the server's — SFTP gives us no
+    /// cheap way to verify that, so a partial file from a *different* source
+    /// would silently produce a corrupt result.
     public func download(
         remote: String,
         to localURL: URL,
-        progress: SFTPProgress? = nil
+        progress: SFTPProgress? = nil,
+        resume: Bool = false
     ) async throws {
         let total = (try? await stat(remote))?.size ?? 0
+
+        var startOffset: UInt64 = 0
+        let fm = FileManager.default
+        if resume, fm.fileExists(atPath: localURL.path) {
+            let existing = (try? fm.attributesOfItem(atPath: localURL.path)[.size] as? UInt64) ?? 0
+            // A local file at or beyond the remote size has nothing left to fetch.
+            if existing >= total && total > 0 {
+                progress?(total, total)
+                return
+            }
+            startOffset = existing
+        } else {
+            fm.createFile(atPath: localURL.path, contents: nil)
+        }
+
         let handle = try await openFile(remote, flags: .read)
 
-        FileManager.default.createFile(atPath: localURL.path, contents: nil)
         guard let out = FileHandle(forWritingAtPath: localURL.path) else {
             try? await closeHandle(handle)
             throw SFTPError.transportFailed("cannot open \(localURL.path) for writing")
         }
 
         do {
-            var offset: UInt64 = 0
+            var offset = startOffset
             var finished = false
 
             while !finished {
+                try Task.checkCancellation()
                 let base = offset
                 // Fire a window of reads at successive offsets. Responses may
                 // arrive in any order, so each is tagged with its slot.
@@ -398,10 +420,15 @@ public actor SFTPClient {
     }
 
     /// Upload a local file to a remote path.
+    ///
+    /// With `resume: true`, an existing remote file is treated as a partial
+    /// transfer and the upload restarts at its current length. Same caveat as
+    /// `download(remote:to:progress:resume:)`: the existing bytes are trusted.
     public func upload(
         localURL: URL,
         to remote: String,
-        progress: SFTPProgress? = nil
+        progress: SFTPProgress? = nil,
+        resume: Bool = false
     ) async throws {
         guard let input = FileHandle(forReadingAtPath: localURL.path) else {
             throw SFTPError.transportFailed("cannot open \(localURL.path) for reading")
@@ -411,11 +438,24 @@ public actor SFTPClient {
         let total = (try? FileManager.default.attributesOfItem(atPath: localURL.path)[.size]
             as? UInt64) ?? 0
 
-        let handle = try await openFile(remote, flags: [.write, .create, .trunc])
+        var startOffset: UInt64 = 0
+        if resume, let existing = try? await stat(remote), existing.size > 0 {
+            if existing.size >= total {
+                progress?(total, total)
+                return
+            }
+            startOffset = existing.size
+            try input.seek(toOffset: startOffset)
+        }
+
+        // Resuming must not truncate what is already there.
+        let flags: SFTPOpenFlags = startOffset > 0 ? [.write] : [.write, .create, .trunc]
+        let handle = try await openFile(remote, flags: flags)
 
         do {
-            var offset: UInt64 = 0
+            var offset = startOffset
             while true {
+                try Task.checkCancellation()
                 // Reading locally is cheap, so fill a window before sending.
                 var batch: [(offset: UInt64, bytes: [UInt8])] = []
                 for _ in 0..<Self.pipelineDepth {
@@ -468,12 +508,14 @@ public actor SFTPClient {
     public func downloadDirectory(
         remote: String,
         to localURL: URL,
-        progress: SFTPItemProgress? = nil
+        progress: SFTPItemProgress? = nil,
+        resume: Bool = false
     ) async throws {
         try FileManager.default.createDirectory(
             at: localURL, withIntermediateDirectories: true)
 
         for entry in try await listDirectory(remote) {
+            try Task.checkCancellation()
             let childRemote = remote.hasSuffix("/")
                 ? remote + entry.filename
                 : remote + "/" + entry.filename
@@ -482,11 +524,12 @@ public actor SFTPClient {
             if entry.attributes.isSymlink {
                 continue
             } else if entry.attributes.isDirectory {
-                try await downloadDirectory(remote: childRemote, to: childLocal, progress: progress)
+                try await downloadDirectory(
+                    remote: childRemote, to: childLocal, progress: progress, resume: resume)
             } else {
-                try await download(remote: childRemote, to: childLocal) { done, total in
+                try await download(remote: childRemote, to: childLocal, progress: { done, total in
                     progress?(childRemote, done, total)
-                }
+                }, resume: resume)
             }
         }
     }
@@ -495,7 +538,8 @@ public actor SFTPClient {
     public func uploadDirectory(
         localURL: URL,
         to remote: String,
-        progress: SFTPItemProgress? = nil
+        progress: SFTPItemProgress? = nil,
+        resume: Bool = false
     ) async throws {
         try await makeDirectoryIfNeeded(remote)
 
@@ -504,6 +548,7 @@ public actor SFTPClient {
             at: localURL, includingPropertiesForKeys: keys, options: [])
 
         for child in children {
+            try Task.checkCancellation()
             let values = try? child.resourceValues(forKeys: Set(keys))
             let childRemote = remote.hasSuffix("/")
                 ? remote + child.lastPathComponent
@@ -512,11 +557,12 @@ public actor SFTPClient {
             if values?.isSymbolicLink == true {
                 continue
             } else if values?.isDirectory == true {
-                try await uploadDirectory(localURL: child, to: childRemote, progress: progress)
+                try await uploadDirectory(
+                    localURL: child, to: childRemote, progress: progress, resume: resume)
             } else {
-                try await upload(localURL: child, to: childRemote) { done, total in
+                try await upload(localURL: child, to: childRemote, progress: { done, total in
                     progress?(childRemote, done, total)
-                }
+                }, resume: resume)
             }
         }
     }
@@ -535,6 +581,7 @@ public actor SFTPClient {
     /// Recursively delete a remote directory.
     public func removeDirectoryRecursively(_ path: String) async throws {
         for entry in try await listDirectory(path) {
+            try Task.checkCancellation()
             let child = path.hasSuffix("/") ? path + entry.filename : path + "/" + entry.filename
             if entry.attributes.isDirectory && !entry.attributes.isSymlink {
                 try await removeDirectoryRecursively(child)

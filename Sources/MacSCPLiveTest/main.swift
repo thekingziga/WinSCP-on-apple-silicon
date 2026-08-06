@@ -305,10 +305,12 @@ do {
     model.localSelection = ["up.txt"]
     expect(model.localItems.contains { $0.name == "up.txt" }, "local pane sees the new file")
 
-    await model.uploadSelected()
+    model.uploadSelected()
+    expectEqual(model.queue.items.count, 1, "upload was enqueued")
+    await model.queue.waitUntilIdle()
+    expectEqual(model.queue.items.first?.state, .completed, "queue item completed")
     expect(model.remoteItems.contains { $0.name == "up.txt" },
            "remote pane refreshed itself after upload")
-    expect(!model.isBusy, "busy flag cleared after upload")
     expectEqual(try await client.stat(appRemote + "/up.txt").size, UInt64(payload.utf8.count),
                 "uploaded content reached the server")
 
@@ -316,7 +318,8 @@ do {
     try FileManager.default.removeItem(at: appLocal.appendingPathComponent("up.txt"))
     model.refreshLocal()
     model.remoteSelection = ["up.txt"]
-    await model.downloadSelected()
+    model.downloadSelected()
+    await model.queue.waitUntilIdle()
     let roundTripped = try? String(
         contentsOf: appLocal.appendingPathComponent("up.txt"), encoding: .utf8)
     expectEqual(roundTripped, payload, "file came back through the model with identical content")
@@ -330,7 +333,8 @@ do {
                        atomically: true, encoding: .utf8)
     model.refreshLocal()
     model.localSelection = ["folder"]
-    await model.uploadSelected()
+    model.uploadSelected()
+    await model.queue.waitUntilIdle()
     expectEqual(try await client.stat(appRemote + "/folder/inner/deep.txt").size, 5,
                 "nested file uploaded through the model")
 
@@ -357,6 +361,105 @@ do {
     let blankModel = AppModel(sessionStore: SessionStore(url: storeURL))
     await blankModel.connect(SessionData())
     expect(blankModel.log.contains { $0.isError }, "empty host rejected with an error")
+
+    section("Resume: download picks up from a partial local file")
+    // 500 KiB so the transfer spans many pipeline windows.
+    let resumeBytes = (0..<(500 * 1024)).map { UInt8($0 % 241) }
+    let resumeLocal = localScratch.appendingPathComponent("resume-source.bin")
+    try Data(resumeBytes).write(to: resumeLocal)
+    let resumeRemote = appRemote + "/resume.bin"
+    try await client.upload(localURL: resumeLocal, to: resumeRemote)
+
+    // Simulate an interrupted download: only the first 100 KiB landed.
+    let partialLocal = localScratch.appendingPathComponent("resume-partial.bin")
+    try Data(resumeBytes.prefix(100 * 1024)).write(to: partialLocal)
+
+    try await client.download(remote: resumeRemote, to: partialLocal, resume: true)
+    let resumedDown = [UInt8](try Data(contentsOf: partialLocal))
+    expectEqual(resumedDown.count, resumeBytes.count, "resumed download reached full size")
+    expect(resumedDown == resumeBytes, "resumed download content is correct end to end")
+
+    // Resuming an already-complete file must be a no-op, not a duplication.
+    try await client.download(remote: resumeRemote, to: partialLocal, resume: true)
+    expectEqual([UInt8](try Data(contentsOf: partialLocal)).count, resumeBytes.count,
+                "resuming a complete file does not append again")
+
+    section("Resume: upload picks up from a partial remote file")
+    let partialRemote = appRemote + "/resume-up.bin"
+    let truncatedLocal = localScratch.appendingPathComponent("truncated.bin")
+    try Data(resumeBytes.prefix(120 * 1024)).write(to: truncatedLocal)
+    try await client.upload(localURL: truncatedLocal, to: partialRemote)
+    expectEqual(try await client.stat(partialRemote).size, UInt64(120 * 1024),
+                "partial remote file in place")
+
+    try await client.upload(localURL: resumeLocal, to: partialRemote, resume: true)
+    expectEqual(try await client.stat(partialRemote).size, UInt64(resumeBytes.count),
+                "resumed upload reached full size")
+
+    let verifyBack = localScratch.appendingPathComponent("verify-up.bin")
+    try await client.download(remote: partialRemote, to: verifyBack)
+    expect([UInt8](try Data(contentsOf: verifyBack)) == resumeBytes,
+           "resumed upload content is correct end to end")
+
+    section("Queue: cancelling queued items")
+    model.remoteSelection = []
+    model.localSelection = []
+    let queueSource = appLocal.appendingPathComponent("q.bin")
+    try Data(resumeBytes).write(to: queueSource)
+    model.refreshLocal()
+
+    model.queue.clearFinished()
+    let a = TransferItem(name: "q1.bin", direction: .upload, localURL: queueSource,
+                         remotePath: appRemote + "/q1.bin")
+    let b = TransferItem(name: "q2.bin", direction: .upload, localURL: queueSource,
+                         remotePath: appRemote + "/q2.bin")
+    let c = TransferItem(name: "q3.bin", direction: .upload, localURL: queueSource,
+                         remotePath: appRemote + "/q3.bin")
+    model.queue.enqueue([a, b, c])
+    // The queue is serial, so b and c are still queued while a runs.
+    model.queue.cancel(b.id)
+    model.queue.cancel(c.id)
+    await model.queue.waitUntilIdle()
+
+    expectEqual(model.queue.items.first { $0.id == a.id }?.state, .completed, "first item completed")
+    expectEqual(model.queue.items.first { $0.id == b.id }?.state, .cancelled, "queued item cancelled")
+    expectEqual(model.queue.items.first { $0.id == c.id }?.state, .cancelled, "second queued item cancelled")
+    var cancelledExists = false
+    do { _ = try await client.stat(appRemote + "/q2.bin") } catch { cancelledExists = true }
+    expect(cancelledExists, "cancelled transfer never created its remote file")
+
+    section("Queue: failure and retry")
+    model.queue.clearFinished()
+    model.queue.enqueue(TransferItem(
+        name: "ghost.bin", direction: .download,
+        localURL: appLocal.appendingPathComponent("ghost.bin"),
+        remotePath: appRemote + "/definitely-not-here.bin"))
+    await model.queue.waitUntilIdle()
+    expectEqual(model.queue.failedCount, 1, "missing remote file fails the queue item")
+    expect(model.queue.items.first?.state.isFailed == true, "state carries the failure")
+
+    expectEqual(model.queue.retryFailed(), 1, "retryFailed re-queues the item")
+    await model.queue.waitUntilIdle()
+    expectEqual(model.queue.failedCount, 1, "still fails on retry, as expected")
+    model.queue.clearFinished()
+    expectEqual(model.queue.items.count, 0, "clearFinished empties the queue")
+
+    section("Drag and drop entry point")
+    // enqueueTransfer is what a pane drop calls; it must work off names alone,
+    // independently of the current selection.
+    model.localSelection = []
+    model.refreshLocal()
+    model.enqueueTransfer(names: ["q.bin"], direction: .upload)
+    expectEqual(model.queue.items.count, 1, "drop enqueued one transfer")
+    expectEqual(model.queue.items.first?.direction, .upload, "direction taken from the drop target")
+    await model.queue.waitUntilIdle()
+    expectEqual(model.queue.items.first?.state, .completed, "dropped transfer completed")
+    expectEqual(try await client.stat(appRemote + "/q.bin").size, UInt64(resumeBytes.count),
+                "dropped file reached the server intact")
+
+    model.enqueueTransfer(names: ["nothing-here.bin"], direction: .upload)
+    expectEqual(model.queue.items.count, 1, "unknown name enqueues nothing")
+    model.queue.clearFinished()
 
     section("AppModel: disconnect")
     await model.disconnect()

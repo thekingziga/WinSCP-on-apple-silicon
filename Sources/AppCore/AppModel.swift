@@ -49,13 +49,62 @@ public final class AppModel: ObservableObject {
     @Published public var progressLabel: String = ""
     @Published public var progressFraction: Double = 0
 
+    /// Pending and finished transfers.
+    public let queue = TransferQueue()
+
     private var client: SFTPClient?
     private let sessionStore: SessionStore
+    /// Guards against a reconnect storm when a server is simply down.
+    private var isReconnecting = false
 
     public init(sessionStore: SessionStore = .shared) {
         self.sessionStore = sessionStore
         sessions = sessionStore.load()
         refreshLocal()
+
+        queue.clientProvider = { [weak self] in self?.client }
+        queue.onLog = { [weak self] text, isError in
+            isError == true ? self?.fail(text) : self?.note(text)
+        }
+        queue.onItemFinished = { [weak self] item in
+            guard let self else { return }
+            Task { await self.handleFinishedTransfer(item) }
+        }
+    }
+
+    /// Refreshes whichever pane the transfer landed in, and notices when a
+    /// failure was actually the connection dropping underneath us.
+    private func handleFinishedTransfer(_ item: TransferItem) async {
+        switch item.direction {
+        case .download: refreshLocal()
+        case .upload: await refreshRemote()
+        }
+
+        guard item.state.isFailed, let client else { return }
+        let stillUp = await client.isConnected
+        guard !stillUp else { return }
+
+        isConnected = false
+        fail("Connection lost.")
+        await reconnectAndResume()
+    }
+
+    /// Reconnects using the stored session and re-queues failed transfers.
+    /// Anything that had moved bytes resumes from its offset rather than
+    /// starting over.
+    public func reconnectAndResume() async {
+        guard !isReconnecting, !isConnected, session.isValid else { return }
+        isReconnecting = true
+        defer { isReconnecting = false }
+
+        note("Reconnecting to \(session.sshTarget)…")
+        await connect(session)
+        guard isConnected else { return }
+
+        let retried = queue.retryFailed()
+        if retried > 0 {
+            note("Resuming \(retried) transfer\(retried == 1 ? "" : "s")")
+        }
     }
 
     // MARK: - Logging
@@ -196,78 +245,68 @@ public final class AppModel: ObservableObject {
 
     // MARK: - Transfers
 
-    public func downloadSelected() async {
-        guard let client, !remoteSelection.isEmpty else { return }
+    public func downloadSelected() {
+        guard isConnected, !remoteSelection.isEmpty else { return }
         let targets = remoteItems.filter { remoteSelection.contains($0.name) }
         guard !targets.isEmpty else { return }
 
-        isBusy = true
-        defer { isBusy = false; progressLabel = ""; progressFraction = 0 }
-
-        for item in targets {
-            let remote = joinRemote(remotePath, item.name)
-            let destination = localURL.appendingPathComponent(item.name)
-            do {
-                if item.isDirectory {
-                    progressLabel = "Downloading folder \(item.name)"
-                    try await client.downloadDirectory(remote: remote, to: destination) { path, done, total in
-                        Task { @MainActor in
-                            self.progressLabel = "Downloading \((path as NSString).lastPathComponent)"
-                            self.progressFraction = total > 0 ? Double(done) / Double(total) : 0
-                        }
-                    }
-                    note("Downloaded folder \(item.name) → \(destination.path)")
-                } else {
-                    progressLabel = "Downloading \(item.name)"
-                    try await client.download(remote: remote, to: destination) { done, total in
-                        Task { @MainActor in
-                            self.progressFraction = total > 0 ? Double(done) / Double(total) : 0
-                        }
-                    }
-                    note("Downloaded \(item.name) → \(destination.path)")
-                }
-            } catch {
-                fail("Download \(item.name): \(errorText(error))")
-            }
-        }
-        refreshLocal()
+        queue.enqueue(targets.map { item in
+            TransferItem(
+                name: item.name,
+                direction: .download,
+                localURL: localURL.appendingPathComponent(item.name),
+                remotePath: joinRemote(remotePath, item.name),
+                isDirectory: item.isDirectory
+            )
+        })
     }
 
-    public func uploadSelected() async {
-        guard let client, !localSelection.isEmpty else { return }
+    public func uploadSelected() {
+        guard isConnected, !localSelection.isEmpty else { return }
         let targets = localItems.filter { localSelection.contains($0.name) }
         guard !targets.isEmpty else { return }
 
-        isBusy = true
-        defer { isBusy = false; progressLabel = ""; progressFraction = 0 }
+        queue.enqueue(targets.map { item in
+            TransferItem(
+                name: item.name,
+                direction: .upload,
+                localURL: localURL.appendingPathComponent(item.name),
+                remotePath: joinRemote(remotePath, item.name),
+                isDirectory: item.isDirectory
+            )
+        })
+    }
 
-        for item in targets {
-            let source = localURL.appendingPathComponent(item.name)
-            let remote = joinRemote(remotePath, item.name)
-            do {
-                if item.isDirectory {
-                    progressLabel = "Uploading folder \(item.name)"
-                    try await client.uploadDirectory(localURL: source, to: remote) { path, done, total in
-                        Task { @MainActor in
-                            self.progressLabel = "Uploading \((path as NSString).lastPathComponent)"
-                            self.progressFraction = total > 0 ? Double(done) / Double(total) : 0
-                        }
-                    }
-                    note("Uploaded folder \(item.name) → \(remote)")
-                } else {
-                    progressLabel = "Uploading \(item.name)"
-                    try await client.upload(localURL: source, to: remote) { done, total in
-                        Task { @MainActor in
-                            self.progressFraction = total > 0 ? Double(done) / Double(total) : 0
-                        }
-                    }
-                    note("Uploaded \(item.name) → \(remote)")
-                }
-            } catch {
-                fail("Upload \(item.name): \(errorText(error))")
+    /// Retry everything that failed. If the connection dropped, reconnect
+    /// first — otherwise every retry would fail again immediately.
+    public func retryFailedTransfers() async {
+        if !isConnected {
+            await reconnectAndResume()
+        } else {
+            let retried = queue.retryFailed()
+            if retried > 0 {
+                note("Retrying \(retried) transfer\(retried == 1 ? "" : "s")")
             }
         }
-        await refreshRemote()
+    }
+
+    /// Drag-and-drop entry point: transfer named items in a given direction
+    /// regardless of what is currently selected.
+    public func enqueueTransfer(names: [String], direction: TransferDirection) {
+        guard isConnected else { return }
+        let source = direction == .upload ? localItems : remoteItems
+        let matched = source.filter { names.contains($0.name) }
+        guard !matched.isEmpty else { return }
+
+        queue.enqueue(matched.map { item in
+            TransferItem(
+                name: item.name,
+                direction: direction,
+                localURL: localURL.appendingPathComponent(item.name),
+                remotePath: joinRemote(remotePath, item.name),
+                isDirectory: item.isDirectory
+            )
+        })
     }
 
     // MARK: - Mutations

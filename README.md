@@ -38,7 +38,7 @@ direct implementation of the same SFTP protocol WinSCP speaks.
 ```
 Sources/SFTPKit/     SFTP protocol + transport   (replaces source/core + source/putty)
 Sources/CoreKit/     Session model, masks, local FS
-Sources/AppCore/     AppModel — application state and behaviour
+Sources/AppCore/     AppModel + TransferQueue — application state and behaviour
 Sources/MacSCP/      SwiftUI views + @main       (replaces source/forms + source/packages)
 ```
 
@@ -66,16 +66,20 @@ has a practical payoff described below.
 ## Status
 
 Builds clean, launches, and transfers files against a real SFTP server.
-**194 checks passing.**
+**215 checks passing.**
 
 | Component | State |
 |---|---|
 | SFTP codec (framing, attributes, glob) | 67 checks |
 | Session model, masks, local FS | 60 checks |
-| SSH transport + client engine | 67 checks against live OpenSSH |
+| SSH transport + client engine | 88 checks against live OpenSSH |
 | `AppModel` (what the views are bound to) | covered by the live suite |
 | SwiftUI views themselves | render only — **no automated UI interaction** |
 | Directory (recursive) transfers | Implemented — symlinks skipped, not followed |
+| Transfer queue with per-item cancel | Implemented |
+| Drag and drop between panes | Implemented — engine path tested, the drag gesture itself is not |
+| Resume interrupted transfers | Implemented, both directions |
+| Reconnect and resume on connection loss | Implemented |
 | Transfer pipelining | 16 requests in flight |
 | Password-only authentication | Not supported — key/agent only |
 | FTP / FTPS / S3 / WebDAV | Not implemented — SFTP only |
@@ -124,12 +128,16 @@ And against a real server — this one needs a host you can already `ssh` into:
 swift run MacSCPLiveTest user@host [port] [ssh options...]
 ```
 
-67 checks in two halves. First the engine directly: connect, REALPATH,
+88 checks in two halves. First the engine directly: connect, REALPATH,
 MKDIR/LIST/STAT, text and binary round-trips, non-ASCII filenames, RENAME,
 SETSTAT, recursive upload/download/delete, symlink skipping, and error mapping.
 Then `AppModel` — the object the SwiftUI views bind to — driven the way the UI
 drives it: set a pane selection, call `uploadSelected()`, check the other pane
 refreshed itself.
+
+It also covers the queue: serial execution, cancelling a queued item, failure
+and retry, resume from a partial file in both directions, and the
+`enqueueTransfer` path a pane drop calls.
 
 Everything runs inside a temporary directory under the login directory and is
 deleted afterwards; sessions are written to an injected store so your real
@@ -152,6 +160,13 @@ Measured over loopback, where RTT is nearly zero and the effect is therefore
 | 16 (current)   | 877 MiB/s | 785 MiB/s |
 
 ~2.6× even with no network latency to hide. On a real link the gap is far wider.
+
+### Resume trusts existing bytes
+
+Resuming a partial transfer restarts at the existing file's length and assumes
+those bytes match the other side. SFTP offers no cheap way to verify that, and
+WinSCP behaves the same way. A partial file left over from a *different* source
+would therefore produce a silently corrupt result.
 
 **Do not add an `NSApplicationDelegateAdaptor` to `MacSCPApp`.** An earlier
 version had one calling `setActivationPolicy(.regular)` on the theory that an
