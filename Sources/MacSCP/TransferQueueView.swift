@@ -39,8 +39,24 @@ struct TransferQueueView: View {
                     .font(.caption)
                     .foregroundStyle(.red)
             }
+            if queue.conflictCount > 0 {
+                Text("\(queue.conflictCount) need a decision")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
 
             Spacer()
+
+            if queue.conflictCount > 1 {
+                Menu("Resolve all") {
+                    Button("Overwrite all") { queue.resolveAllConflicts(with: .overwrite) }
+                    Button("Resume all") { queue.resolveAllConflicts(with: .resume) }
+                    Button("Skip all") { queue.resolveAllConflicts(with: .skip) }
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .font(.caption)
+            }
 
             Button("Retry failed", action: onRetryFailed)
                 .buttonStyle(.borderless)
@@ -103,7 +119,17 @@ struct TransferQueueView: View {
                 }
             }
 
-            if !item.state.isFinished {
+            if item.state.needsDecision {
+                HStack(spacing: 4) {
+                    Button("Overwrite") { queue.resolveConflict(item.id, with: .overwrite) }
+                        .help("Replace the existing file")
+                    Button("Resume") { queue.resolveConflict(item.id, with: .resume) }
+                        .help("Treat the existing file as a partial transfer and continue it")
+                    Button("Skip") { queue.resolveConflict(item.id, with: .skip) }
+                }
+                .buttonStyle(.borderless)
+                .font(.caption2)
+            } else if !item.state.isFinished {
                 Button {
                     queue.cancel(item.id)
                 } label: {
@@ -122,6 +148,8 @@ struct TransferQueueView: View {
         case .completed: return "checkmark.circle.fill"
         case .failed: return "exclamationmark.triangle.fill"
         case .cancelled: return "slash.circle"
+        case .skipped: return "forward.circle"
+        case .conflict: return "questionmark.circle.fill"
         case .running: return item.direction == .upload ? "arrow.up.circle" : "arrow.down.circle"
         case .queued: return "clock"
         }
@@ -131,7 +159,8 @@ struct TransferQueueView: View {
         switch item.state {
         case .completed: return .green
         case .failed: return .red
-        case .cancelled: return .secondary
+        case .conflict: return .orange
+        case .cancelled, .skipped: return .secondary
         case .running, .queued: return .secondary
         }
     }
@@ -144,6 +173,9 @@ struct TransferQueueView: View {
             return "\(Int(item.fraction * 100))%"
         case .completed: return "done"
         case .cancelled: return "cancelled"
+        case .skipped: return "skipped"
+        case .conflict(let size):
+            return "exists (\(ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file)))"
         case .failed(let message): return message
         }
     }

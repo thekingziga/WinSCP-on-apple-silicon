@@ -38,16 +38,17 @@ public final class AppModel: ObservableObject {
 
     // Connection
     @Published public var isConnected = false
+    /// True during a blocking session operation such as connecting. Transfers
+    /// do not set this — they report through `queue`.
     @Published public var isBusy = false
     @Published public var session = SessionData()
     @Published public var sessions: [SessionData] = []
     @Published public var showingConnectSheet = false
     @Published public var showHiddenFiles = false
 
-    // Transfer feedback
+    // Transfer feedback. Per-transfer progress lives on `queue`; this is the
+    // activity log only.
     @Published public var log: [LogEntry] = []
-    @Published public var progressLabel: String = ""
-    @Published public var progressFraction: Double = 0
 
     /// Pending and finished transfers.
     public let queue = TransferQueue()

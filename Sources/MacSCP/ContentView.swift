@@ -13,14 +13,19 @@ struct ContentView: View {
             Divider()
             transferBar
             Divider()
-            HSplitView {
+            // A plain HStack rather than nesting an HSplitView inside the outer
+            // one. Nested split views are fiddly and a fixed-width log reads
+            // fine here; the queue takes the remaining space.
+            HStack(spacing: 0) {
                 TransferQueueView(queue: model.queue) {
                     Task { await model.retryFailedTransfers() }
                 }
-                .frame(minWidth: 320, idealWidth: 480)
+                .frame(maxWidth: .infinity)
+
+                Divider()
 
                 logView
-                    .frame(minWidth: 260)
+                    .frame(width: 300)
             }
             .frame(height: 170)
         }
@@ -85,7 +90,7 @@ struct ContentView: View {
             } label: {
                 Label("Upload", systemImage: "arrow.right")
             }
-            .disabled(!model.isConnected || model.localSelection.isEmpty || model.isBusy)
+            .disabled(!model.isConnected || model.localSelection.isEmpty)
             .help("Copy the selected local files to the remote directory")
 
             Button {
@@ -93,18 +98,25 @@ struct ContentView: View {
             } label: {
                 Label("Download", systemImage: "arrow.left")
             }
-            .disabled(!model.isConnected || model.remoteSelection.isEmpty || model.isBusy)
+            .disabled(!model.isConnected || model.remoteSelection.isEmpty)
             .help("Copy the selected remote files to the local directory")
 
             Divider().frame(height: 18)
 
             if model.isBusy {
-                ProgressView(value: model.progressFraction)
-                    .frame(width: 180)
-                Text(model.progressLabel)
+                ProgressView()
+                    .controlSize(.small)
+                Text("Connecting…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if let active = model.queue.activeItem {
+                ProgressView(value: active.fraction)
+                    .frame(width: 160)
+                Text("\(active.direction.verb)ing \(active.name)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                    .truncationMode(.middle)
             }
 
             Spacer()

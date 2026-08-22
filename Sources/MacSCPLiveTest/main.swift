@@ -441,6 +441,8 @@ do {
     expectEqual(model.queue.retryFailed(), 1, "retryFailed re-queues the item")
     await model.queue.waitUntilIdle()
     expectEqual(model.queue.failedCount, 1, "still fails on retry, as expected")
+    expect(!FileManager.default.fileExists(atPath: appLocal.appendingPathComponent("ghost.bin").path),
+           "a failed download leaves no empty local file behind")
     model.queue.clearFinished()
     expectEqual(model.queue.items.count, 0, "clearFinished empties the queue")
 
@@ -459,6 +461,92 @@ do {
 
     model.enqueueTransfer(names: ["nothing-here.bin"], direction: .upload)
     expectEqual(model.queue.items.count, 1, "unknown name enqueues nothing")
+    model.queue.clearFinished()
+
+    section("Overwrite protection: upload onto an existing file")
+    model.queue.clearFinished()
+    let victimRemote = appRemote + "/victim.txt"
+    let originalBody = "ORIGINAL CONTENT THAT MUST NOT VANISH\n"
+    let victimLocal = localScratch.appendingPathComponent("victim-original.txt")
+    try originalBody.write(to: victimLocal, atomically: true, encoding: .utf8)
+    try await client.upload(localURL: victimLocal, to: victimRemote)
+
+    let replacementLocal = appLocal.appendingPathComponent("victim.txt")
+    try "replacement\n".write(to: replacementLocal, atomically: true, encoding: .utf8)
+    model.refreshLocal()
+
+    model.enqueueTransfer(names: ["victim.txt"], direction: .upload)
+    await model.queue.waitUntilIdle()
+
+    expectEqual(model.queue.conflictCount, 1, "existing destination raises a conflict")
+    let victimItem = model.queue.items.first { $0.state.needsDecision }
+    expect(victimItem != nil, "state is awaiting a decision")
+    if case .conflict(let size) = victimItem?.state {
+        expectEqual(size, UInt64(originalBody.utf8.count), "conflict reports the existing size")
+    } else {
+        expect(false, "conflict carries the existing size")
+    }
+    // The critical property: nothing was written while waiting.
+    expectEqual(try await client.stat(victimRemote).size, UInt64(originalBody.utf8.count),
+                "remote file untouched while the conflict is unresolved")
+
+    section("Overwrite protection: skip leaves the file alone")
+    model.queue.resolveConflict(victimItem!.id, with: .skip)
+    await model.queue.waitUntilIdle()
+    expectEqual(model.queue.items.first { $0.id == victimItem!.id }?.state, .skipped,
+                "skip marks the item skipped")
+    expectEqual(try await client.stat(victimRemote).size, UInt64(originalBody.utf8.count),
+                "skipped transfer never overwrote the file")
+
+    section("Overwrite protection: clearFinished keeps unresolved conflicts")
+    model.queue.clearFinished()
+    model.enqueueTransfer(names: ["victim.txt"], direction: .upload)
+    await model.queue.waitUntilIdle()
+    expectEqual(model.queue.conflictCount, 1, "conflict raised again")
+    model.queue.clearFinished()
+    expectEqual(model.queue.conflictCount, 1, "clearFinished did not discard the pending decision")
+
+    section("Overwrite protection: overwrite replaces the file")
+    let overwriteID = model.queue.items.first { $0.state.needsDecision }!.id
+    model.queue.resolveConflict(overwriteID, with: .overwrite)
+    await model.queue.waitUntilIdle()
+    expectEqual(model.queue.items.first { $0.id == overwriteID }?.state, .completed,
+                "overwrite completed")
+    expectEqual(try await client.stat(victimRemote).size, UInt64("replacement\n".utf8.count),
+                "remote file now holds the replacement")
+
+    section("Overwrite protection: resume continues a partial file")
+    model.queue.clearFinished()
+    // A local file holding the first 100 KiB of a known 500 KiB remote file.
+    let partialName = "partial-resume.bin"
+    let partialTarget = appLocal.appendingPathComponent(partialName)
+    try Data(resumeBytes.prefix(100 * 1024)).write(to: partialTarget)
+    model.refreshLocal()
+    model.remoteSelection = []
+    model.queue.enqueue(TransferItem(
+        name: partialName, direction: .download,
+        localURL: partialTarget, remotePath: resumeRemote))
+    await model.queue.waitUntilIdle()
+    expectEqual(model.queue.conflictCount, 1, "existing local file raises a download conflict")
+
+    let resumeID = model.queue.items.first { $0.state.needsDecision }!.id
+    model.queue.resolveConflict(resumeID, with: .resume)
+    await model.queue.waitUntilIdle()
+    expectEqual(model.queue.items.first { $0.id == resumeID }?.state, .completed,
+                "resume completed")
+    let resumedViaQueue = [UInt8](try Data(contentsOf: partialTarget))
+    expectEqual(resumedViaQueue.count, resumeBytes.count, "resumed to the full size")
+    expect(resumedViaQueue == resumeBytes, "queue resume produced correct bytes")
+
+    section("Overwrite protection: bulk resolution")
+    model.queue.clearFinished()
+    model.enqueueTransfer(names: ["victim.txt", "q.bin"], direction: .upload)
+    await model.queue.waitUntilIdle()
+    expectEqual(model.queue.conflictCount, 2, "both existing files raise conflicts")
+    expectEqual(model.queue.resolveAllConflicts(with: .skip), 2, "bulk resolution answers both")
+    await model.queue.waitUntilIdle()
+    expectEqual(model.queue.conflictCount, 0, "no conflicts remain")
+    expectEqual(model.queue.items.filter { $0.state == .skipped }.count, 2, "both skipped")
     model.queue.clearFinished()
 
     section("AppModel: disconnect")

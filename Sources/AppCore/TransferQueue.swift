@@ -8,22 +8,44 @@ public enum TransferDirection: String, Sendable, Codable {
     public var verb: String { self == .upload ? "Upload" : "Download" }
 }
 
+/// What to do when a transfer would overwrite an existing file.
+public enum OverwritePolicy: String, Sendable, CaseIterable {
+    /// Stop and wait for the user. The default: silently destroying a file is
+    /// the one mistake a file manager must not make on its own.
+    case ask
+    case overwrite
+    case skip
+    /// Treat the existing bytes as a partial transfer and continue from them.
+    case resume
+}
+
 public enum TransferState: Sendable, Equatable {
     case queued
     case running
     case completed
     case cancelled
+    case skipped
     case failed(String)
+    /// Destination already exists; carries its current size. Waiting on a
+    /// decision, not an error.
+    case conflict(UInt64)
 
+    /// Not currently occupying the queue. A conflict counts as inactive — it
+    /// blocks nothing while it waits for the user.
     public var isFinished: Bool {
         switch self {
-        case .completed, .cancelled, .failed: return true
+        case .completed, .cancelled, .failed, .skipped, .conflict: return true
         case .queued, .running: return false
         }
     }
 
     public var isFailed: Bool {
         if case .failed = self { return true }
+        return false
+    }
+
+    public var needsDecision: Bool {
+        if case .conflict = self { return true }
         return false
     }
 }
@@ -42,6 +64,7 @@ public struct TransferItem: Identifiable, Sendable, Equatable {
     /// Set once a transfer has moved bytes, so a retry can resume rather than
     /// start over.
     public var hasPartialData: Bool
+    public var overwritePolicy: OverwritePolicy
 
     public init(
         id: UUID = UUID(),
@@ -53,7 +76,8 @@ public struct TransferItem: Identifiable, Sendable, Equatable {
         state: TransferState = .queued,
         bytesDone: UInt64 = 0,
         bytesTotal: UInt64 = 0,
-        hasPartialData: Bool = false
+        hasPartialData: Bool = false,
+        overwritePolicy: OverwritePolicy = .ask
     ) {
         self.id = id
         self.name = name
@@ -65,6 +89,7 @@ public struct TransferItem: Identifiable, Sendable, Equatable {
         self.bytesDone = bytesDone
         self.bytesTotal = bytesTotal
         self.hasPartialData = hasPartialData
+        self.overwritePolicy = overwritePolicy
     }
 
     public var fraction: Double {
@@ -140,8 +165,43 @@ public final class TransferQueue: ObservableObject {
         activeTransfer?.cancel()
     }
 
+    /// Removes settled items. Conflicts are kept — they are waiting on the
+    /// user, and dropping them would silently discard the request.
     public func clearFinished() {
-        items.removeAll { $0.state.isFinished }
+        items.removeAll { $0.state.isFinished && !$0.state.needsDecision }
+    }
+
+    public var conflictCount: Int {
+        items.filter { $0.state.needsDecision }.count
+    }
+
+    /// Answers one conflict.
+    public func resolveConflict(_ id: UUID, with policy: OverwritePolicy) {
+        guard let index = items.firstIndex(where: { $0.id == id }),
+              items[index].state.needsDecision else { return }
+
+        switch policy {
+        case .skip, .ask:
+            items[index].state = .skipped
+        case .overwrite:
+            items[index].overwritePolicy = .overwrite
+            items[index].hasPartialData = false
+            items[index].state = .queued
+            pump()
+        case .resume:
+            items[index].overwritePolicy = .resume
+            items[index].hasPartialData = true
+            items[index].state = .queued
+            pump()
+        }
+    }
+
+    /// Answers every outstanding conflict the same way.
+    @discardableResult
+    public func resolveAllConflicts(with policy: OverwritePolicy) -> Int {
+        let ids = items.filter { $0.state.needsDecision }.map(\.id)
+        for id in ids { resolveConflict(id, with: policy) }
+        return ids.count
     }
 
     /// Re-queues everything that failed, preserving partial progress so the
@@ -165,6 +225,11 @@ public final class TransferQueue: ObservableObject {
         items.filter { $0.state.isFailed }.count
     }
 
+    /// The transfer currently moving bytes, if any.
+    public var activeItem: TransferItem? {
+        items.first { $0.state == .running }
+    }
+
     // MARK: - Execution
 
     private func pump() {
@@ -183,6 +248,14 @@ public final class TransferQueue: ObservableObject {
             guard let client = clientProvider?() else {
                 items[index].state = .failed("Not connected")
                 onLog?("\(items[index].direction.verb) \(items[index].name): not connected", true)
+                continue
+            }
+
+            // Refuse to clobber an existing destination unless told to.
+            if items[index].overwritePolicy == .ask, !items[index].isDirectory,
+               let existing = await existingSize(of: items[index], using: client) {
+                items[index].state = .conflict(existing)
+                onLog?("\(items[index].name) already exists — waiting for a decision", true)
                 continue
             }
 
@@ -216,9 +289,22 @@ public final class TransferQueue: ObservableObject {
         }
     }
 
+    /// Size of the destination if it already exists, else nil.
+    private func existingSize(of item: TransferItem, using client: SFTPClient) async -> UInt64? {
+        switch item.direction {
+        case .download:
+            guard FileManager.default.fileExists(atPath: item.localURL.path) else { return nil }
+            return (try? FileManager.default.attributesOfItem(atPath: item.localURL.path)[.size]
+                as? UInt64) ?? 0
+        case .upload:
+            guard let attrs = try? await client.stat(item.remotePath) else { return nil }
+            return attrs.size
+        }
+    }
+
     private func perform(_ item: TransferItem, using client: SFTPClient) async throws {
         let id = item.id
-        let resume = item.hasPartialData
+        let resume = item.hasPartialData || item.overwritePolicy == .resume
 
         switch (item.direction, item.isDirectory) {
         case (.download, false):

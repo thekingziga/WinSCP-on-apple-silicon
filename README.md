@@ -66,19 +66,20 @@ has a practical payoff described below.
 ## Status
 
 Builds clean, launches, and transfers files against a real SFTP server.
-**215 checks passing.**
+**234 checks passing.**
 
 | Component | State |
 |---|---|
 | SFTP codec (framing, attributes, glob) | 67 checks |
 | Session model, masks, local FS | 60 checks |
-| SSH transport + client engine | 88 checks against live OpenSSH |
+| SSH transport + client engine | 107 checks against live OpenSSH |
 | `AppModel` (what the views are bound to) | covered by the live suite |
 | SwiftUI views themselves | render only — **no automated UI interaction** |
 | Directory (recursive) transfers | Implemented — symlinks skipped, not followed |
 | Transfer queue with per-item cancel | Implemented |
 | Drag and drop between panes | Implemented — engine path tested, the drag gesture itself is not |
 | Resume interrupted transfers | Implemented, both directions |
+| Overwrite protection | Implemented — conflicts wait for overwrite / resume / skip |
 | Reconnect and resume on connection loss | Implemented |
 | Transfer pipelining | 16 requests in flight |
 | Password-only authentication | Not supported — key/agent only |
@@ -128,7 +129,7 @@ And against a real server — this one needs a host you can already `ssh` into:
 swift run MacSCPLiveTest user@host [port] [ssh options...]
 ```
 
-88 checks in two halves. First the engine directly: connect, REALPATH,
+107 checks in two halves. First the engine directly: connect, REALPATH,
 MKDIR/LIST/STAT, text and binary round-trips, non-ASCII filenames, RENAME,
 SETSTAT, recursive upload/download/delete, symlink skipping, and error mapping.
 Then `AppModel` — the object the SwiftUI views bind to — driven the way the UI
@@ -136,8 +137,10 @@ drives it: set a pane selection, call `uploadSelected()`, check the other pane
 refreshed itself.
 
 It also covers the queue: serial execution, cancelling a queued item, failure
-and retry, resume from a partial file in both directions, and the
-`enqueueTransfer` path a pane drop calls.
+and retry, resume from a partial file in both directions, the `enqueueTransfer`
+path a pane drop calls, and overwrite protection — that an existing destination
+raises a conflict, that nothing is written while the conflict is unresolved, and
+that skip / overwrite / resume each do what they say.
 
 Everything runs inside a temporary directory under the login directory and is
 deleted afterwards; sessions are written to an injected store so your real
@@ -160,6 +163,14 @@ Measured over loopback, where RTT is nearly zero and the effect is therefore
 | 16 (current)   | 877 MiB/s | 785 MiB/s |
 
 ~2.6× even with no network latency to hide. On a real link the gap is far wider.
+
+### Transfers never overwrite silently
+
+A transfer whose destination already exists stops in a `conflict` state and
+waits: overwrite, resume, or skip. Nothing is written until the question is
+answered, and `clearFinished` deliberately keeps unresolved conflicts rather
+than discarding the request. Directory transfers are the exception — the
+per-file prompt is not implemented inside a recursive copy.
 
 ### Resume trusts existing bytes
 

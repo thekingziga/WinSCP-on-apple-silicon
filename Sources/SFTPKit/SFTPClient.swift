@@ -346,11 +346,17 @@ public actor SFTPClient {
                 return
             }
             startOffset = existing
-        } else {
-            fm.createFile(atPath: localURL.path, contents: nil)
         }
 
+        // Open the remote file *before* creating anything locally. Creating it
+        // first meant a download that failed at open — a missing or unreadable
+        // remote file — left an empty local file behind, which then looked like
+        // a real destination to the overwrite check on retry.
         let handle = try await openFile(remote, flags: .read)
+
+        if startOffset == 0 {
+            fm.createFile(atPath: localURL.path, contents: nil)
+        }
 
         guard let out = FileHandle(forWritingAtPath: localURL.path) else {
             try? await closeHandle(handle)
