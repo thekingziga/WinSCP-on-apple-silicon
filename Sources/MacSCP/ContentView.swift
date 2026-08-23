@@ -2,10 +2,20 @@ import SwiftUI
 import AppCore
 import CoreKit
 
+/// Identifiable wrapper so `.sheet(item:)` can present the rename dialog.
+private struct RenameRequest: Identifiable {
+    let id = UUID()
+    let side: PaneSide
+    let oldName: String
+}
+
 struct ContentView: View {
     @EnvironmentObject var model: AppModel
     @State private var newFolderSide: PaneSide?
     @State private var newFolderName = ""
+    @State private var renameRequest: RenameRequest?
+    @State private var renameNewName = ""
+    @State private var confirmDelete: PaneSide?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -36,6 +46,25 @@ struct ContentView: View {
         }
         .sheet(item: $newFolderSide) { side in
             newFolderSheet(side)
+        }
+        .sheet(item: $renameRequest) { req in
+            renameSheet(req)
+        }
+        .alert("Delete selected files?", isPresented: Binding(
+            get: { confirmDelete != nil },
+            set: { if !$0 { confirmDelete = nil } }
+        )) {
+            Button("Cancel", role: .cancel) { confirmDelete = nil }
+            Button("Delete", role: .destructive) {
+                guard let side = confirmDelete else { return }
+                confirmDelete = nil
+                Task { await model.deleteSelected(on: side) }
+            }
+        } message: {
+            if let side = confirmDelete {
+                let names = side == .local ? model.localSelection : model.remoteSelection
+                Text("This will permanently delete \(names.count) item\(names.count == 1 ? "" : "s").")
+            }
         }
     }
 
@@ -191,6 +220,22 @@ struct ContentView: View {
                 Label("New Remote Folder", systemImage: "folder.badge.plus.fill")
             }
             .disabled(!model.isConnected)
+
+            Button {
+                startRename()
+            } label: {
+                Label("Rename", systemImage: "pencil")
+            }
+            .disabled(activeSideForSingleSelection == nil)
+            .help("Rename selected file")
+
+            Button {
+                startDelete()
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
+            .disabled(activeSideForAnySelection == nil)
+            .help("Delete selected files")
         }
     }
 
@@ -219,5 +264,70 @@ struct ContentView: View {
             }
         }
         .padding(20)
+    }
+
+    // MARK: - Rename sheet
+
+    private func renameSheet(_ req: RenameRequest) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Rename \(req.side == .local ? "local" : "remote") item")
+                .font(.headline)
+
+            Text(req.oldName)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+
+            TextField("New name", text: $renameNewName)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 280)
+
+            HStack {
+                Spacer()
+                Button("Cancel") { renameRequest = nil }
+                    .keyboardShortcut(.cancelAction)
+                Button("Rename") {
+                    let old = req.oldName
+                    let newName = renameNewName
+                    let side = req.side
+                    renameRequest = nil
+                    Task { await model.renameItem(on: side, oldName: old, newName: newName) }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(
+                    renameNewName == req.oldName ||
+                    renameNewName.trimmingCharacters(in: .whitespaces).isEmpty
+                )
+            }
+        }
+        .padding(20)
+    }
+
+    // MARK: - Selection helpers
+
+    /// The side that has exactly one item selected, preferring whichever pane
+    /// has focus (local wins ties since it is always available).
+    private var activeSideForSingleSelection: PaneSide? {
+        if model.localSelection.count == 1 { return .local }
+        if model.remoteSelection.count == 1 { return .remote }
+        return nil
+    }
+
+    /// The side that has any selection at all.
+    private var activeSideForAnySelection: PaneSide? {
+        if !model.localSelection.isEmpty { return .local }
+        if !model.remoteSelection.isEmpty { return .remote }
+        return nil
+    }
+
+    private func startRename() {
+        guard let side = activeSideForSingleSelection else { return }
+        let name = (side == .local ? model.localSelection : model.remoteSelection).first!
+        renameNewName = name
+        renameRequest = RenameRequest(side: side, oldName: name)
+    }
+
+    private func startDelete() {
+        guard let side = activeSideForAnySelection else { return }
+        confirmDelete = side
     }
 }

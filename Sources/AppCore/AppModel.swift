@@ -335,6 +335,33 @@ public final class AppModel: ObservableObject {
         }
     }
 
+    /// Renames a single item. Both sides get the same treatment so the UI
+    /// does not need to know whether the rename is local or remote.
+    public func renameItem(on side: PaneSide, oldName: String, newName: String) async {
+        guard !newName.isEmpty, newName != oldName else { return }
+        switch side {
+        case .local:
+            do {
+                try LocalFileSystem.rename(at: localURL.appendingPathComponent(oldName),
+                                           to: newName)
+                note("Renamed local \(oldName) → \(newName)")
+            } catch {
+                fail("Rename \(oldName): \(error.localizedDescription)")
+            }
+            refreshLocal()
+        case .remote:
+            guard let client else { return }
+            do {
+                try await client.rename(from: joinRemote(remotePath, oldName),
+                                        to: joinRemote(remotePath, newName))
+                note("Renamed remote \(oldName) → \(newName)")
+            } catch {
+                fail("Rename \(oldName): \(errorText(error))")
+            }
+            await refreshRemote()
+        }
+    }
+
     public func deleteSelected(on side: PaneSide) async {
         switch side {
         case .local:
