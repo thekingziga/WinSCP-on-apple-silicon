@@ -369,6 +369,34 @@ public final class AppModel: ObservableObject {
         }
     }
 
+    /// Applies a permission mode to one item. `mode` is the low nine bits; the
+    /// caller is expected to have parsed it with
+    /// `SFTPFileAttributes.parsePermissions`.
+    public func setPermissions(on side: PaneSide, name: String, mode: UInt32) async {
+        guard !name.isEmpty else { return }
+        let rendered = SFTPFileAttributes.renderPermissions(mode)
+        switch side {
+        case .local:
+            do {
+                try LocalFileSystem.setPermissions(
+                    at: localURL.appendingPathComponent(name), mode: mode)
+                note("Changed local \(name) to \(rendered)")
+            } catch {
+                fail("Permissions \(name): \(error.localizedDescription)")
+            }
+            refreshLocal()
+        case .remote:
+            guard let client else { return }
+            do {
+                try await client.setPermissions(joinRemote(remotePath, name), mode: mode)
+                note("Changed remote \(name) to \(rendered)")
+            } catch {
+                fail("Permissions \(name): \(errorText(error))")
+            }
+            await refreshRemote()
+        }
+    }
+
     public func deleteSelected(on side: PaneSide) async {
         switch side {
         case .local:

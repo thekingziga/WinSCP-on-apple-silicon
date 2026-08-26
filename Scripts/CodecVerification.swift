@@ -221,6 +221,41 @@ do {
     expectEqual(SFTPFileAttributes.renderPermissions(0o040755), "rwxr-xr-x", "type bits masked off")
 }
 
+print("== Permission parsing ==")
+do {
+    expectEqual(SFTPFileAttributes.parsePermissions("644"), 0o644, "three octal digits")
+    expectEqual(SFTPFileAttributes.parsePermissions("0644"), 0o644, "leading zero accepted")
+    expectEqual(SFTPFileAttributes.parsePermissions("777"), 0o777, "0777")
+    expectEqual(SFTPFileAttributes.parsePermissions("0"), 0o000, "bare zero")
+    expectEqual(SFTPFileAttributes.parsePermissions("  644  "), 0o644, "surrounding space ignored")
+
+    expectEqual(SFTPFileAttributes.parsePermissions("rw-r--r--"), 0o644, "symbolic rw-r--r--")
+    expectEqual(SFTPFileAttributes.parsePermissions("rwxr-xr-x"), 0o755, "symbolic rwxr-xr-x")
+    expectEqual(SFTPFileAttributes.parsePermissions("---------"), 0o000, "symbolic all off")
+    expectEqual(SFTPFileAttributes.parsePermissions("rwxrwxrwx"), 0o777, "symbolic all on")
+    expectEqual(SFTPFileAttributes.parsePermissions("--x--x--x"), 0o111, "symbolic exec only")
+
+    // Anything that is not a mode must be rejected, not coerced.
+    expect(SFTPFileAttributes.parsePermissions("") == nil, "empty rejected")
+    expect(SFTPFileAttributes.parsePermissions("   ") == nil, "blank rejected")
+    expect(SFTPFileAttributes.parsePermissions("888") == nil, "non-octal digits rejected")
+    expect(SFTPFileAttributes.parsePermissions("99999") == nil, "too many digits rejected")
+    expect(SFTPFileAttributes.parsePermissions("1777") == nil, "sticky bit out of range rejected")
+    expect(SFTPFileAttributes.parsePermissions("rwxr-xr") == nil, "short symbolic rejected")
+    expect(SFTPFileAttributes.parsePermissions("rwxr-xr-xx") == nil, "long symbolic rejected")
+    expect(SFTPFileAttributes.parsePermissions("xwrxwrxwr") == nil, "wrong letter order rejected")
+    expect(SFTPFileAttributes.parsePermissions("rw-r--r-Z") == nil, "stray letter rejected")
+    expect(SFTPFileAttributes.parsePermissions("hello") == nil, "words rejected")
+
+    // The pair must agree across the whole range they are defined on.
+    var roundTripped = true
+    for mode in UInt32(0)...UInt32(0o777) {
+        let rendered = SFTPFileAttributes.renderPermissions(mode)
+        if SFTPFileAttributes.parsePermissions(rendered) != mode { roundTripped = false; break }
+    }
+    expect(roundTripped, "render → parse round-trips for all 512 modes")
+}
+
 print("== Glob matching (WinSCP mask semantics) ==")
 do {
     expect(Glob.match(pattern: "*", name: "anything"), "* matches anything")

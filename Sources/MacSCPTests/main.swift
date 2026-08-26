@@ -143,6 +143,17 @@ do {
     expect(!file.displaySize.isEmpty, "files show a size")
     expectEqual(file.owner, "", "missing longname yields empty owner")
 
+    // The numeric mode a chmod dialog prefills from. It is only meaningful when
+    // the server actually sent permissions, and must exclude the type bits that
+    // make a directory 0o040755 rather than 0o755.
+    expect(dir.mode == nil, "no mode without the permissions flag")
+    var flagged = SFTPFileAttributes()
+    flagged.flags = [.permissions]
+    flagged.permissions = 0o040755
+    let flaggedDir = FileItem(remote: SFTPName(filename: "d", longname: "", attributes: flagged))
+    expectEqual(flaggedDir.mode, 0o755, "mode masks off the file-type bits")
+    expectEqual(flaggedDir.permissions, "rwxr-xr-x", "rendering agrees with the mode")
+
     // Sorting: directories first, then case-insensitive by name.
     let items = [
         FileItem(name: "zebra.txt", isDirectory: false),
@@ -238,6 +249,23 @@ do {
 
     expectEqual(LocalFileSystem.permissionString(0o644), "rw-r--r--", "local permission rendering")
     expectEqual(LocalFileSystem.permissionString(0o755), "rwxr-xr-x", "local permission rendering, exec")
+
+    // Re-exported from the codec so the views need only CoreKit.
+    expectEqual(LocalFileSystem.parsePermissions("640"), 0o640, "local permission parsing")
+    expectEqual(LocalFileSystem.parsePermissions("rw-r-----"), 0o640, "local symbolic parsing")
+    expect(LocalFileSystem.parsePermissions("nope") == nil, "local parsing rejects junk")
+
+    let chmodTarget = root.appendingPathComponent("perm.txt")
+    try! "x\n".write(to: chmodTarget, atomically: true, encoding: .utf8)
+    try! LocalFileSystem.setPermissions(at: chmodTarget, mode: 0o600)
+    let afterChmod = (try! LocalFileSystem.list(root)).first { $0.name == "perm.txt" }
+    expectEqual(afterChmod?.permissions, "rw-------", "local chmod applied and listed")
+    expectEqual(afterChmod?.mode, 0o600, "numeric mode carried on the item")
+
+    try! LocalFileSystem.setPermissions(at: chmodTarget, mode: 0o644)
+    expectEqual((try! LocalFileSystem.list(root)).first { $0.name == "perm.txt" }?.mode, 0o644,
+                "local chmod applied a second time")
+    try! LocalFileSystem.remove(at: chmodTarget)
 }
 
 // MARK: - Transport argument construction

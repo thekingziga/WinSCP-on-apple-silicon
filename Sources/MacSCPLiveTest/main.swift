@@ -388,6 +388,44 @@ do {
     await model.renameItem(on: .remote, oldName: "nosuchfile.txt", newName: "wishful.txt")
     expect(model.log.last?.isError == true, "failed remote rename logged as an error")
 
+    section("AppModel: permissions on both sides")
+    // SETSTAT is covered against the engine above; this drives the model method
+    // the chmod dialog calls, and checks the pane reflects the new mode.
+    await model.setPermissions(on: .local, name: "after.txt", mode: 0o600)
+    let localChmod = model.localItems.first { $0.name == "after.txt" }
+    expectEqual(localChmod?.permissions, "rw-------", "local pane shows the new mode")
+    expectEqual(localChmod?.mode, 0o600, "local numeric mode refreshed")
+
+    try "remote perms\n".write(to: appLocal.appendingPathComponent("perm.txt"),
+                               atomically: true, encoding: .utf8)
+    model.refreshLocal()
+    model.localSelection = ["perm.txt"]
+    model.uploadSelected()
+    await model.queue.waitUntilIdle()
+
+    await model.setPermissions(on: .remote, name: "perm.txt", mode: 0o640)
+    let remoteChmod = model.remoteItems.first { $0.name == "perm.txt" }
+    expectEqual(remoteChmod?.permissions, "rw-r-----", "remote pane shows the new mode")
+    expectEqual(remoteChmod?.mode, 0o640, "remote numeric mode refreshed")
+    expectEqual(try await client.stat(appRemote + "/perm.txt").permissions & 0o777, 0o640,
+                "server agrees with the pane")
+
+    // The mode the dialog prefills has to survive a plain refresh, or the
+    // dialog would reopen on a stale value.
+    await model.refreshRemote()
+    expectEqual(model.remoteItems.first { $0.name == "perm.txt" }?.mode, 0o640,
+                "mode survives a refresh")
+
+    section("AppModel: permissions failure is reported")
+    let permLogBefore = model.log.count
+    await model.setPermissions(on: .local, name: "", mode: 0o644)
+    expectEqual(model.log.count, permLogBefore, "empty name ignored silently")
+
+    await model.setPermissions(on: .local, name: "nosuchfile.txt", mode: 0o644)
+    expect(model.log.last?.isError == true, "failed local chmod logged as an error")
+    await model.setPermissions(on: .remote, name: "nosuchfile.txt", mode: 0o644)
+    expect(model.log.last?.isError == true, "failed remote chmod logged as an error")
+
     section("AppModel: session persistence")
     model.saveSession(appSession)
     expectEqual(SessionStore(url: storeURL).load().count, 1, "session saved to the injected store")

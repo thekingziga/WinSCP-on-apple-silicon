@@ -14,6 +14,10 @@ public struct FileItem: Identifiable, Sendable, Equatable {
     public var modified: Date?
     public var permissions: String
     public var owner: String
+    /// The low nine permission bits, or nil where the source did not report
+    /// them. `permissions` is this rendered for display; a chmod dialog needs
+    /// the number back, and re-parsing the string to get it would be silly.
+    public var mode: UInt32?
 
     public var id: String { name }
 
@@ -24,7 +28,8 @@ public struct FileItem: Identifiable, Sendable, Equatable {
         size: UInt64 = 0,
         modified: Date? = nil,
         permissions: String = "",
-        owner: String = ""
+        owner: String = "",
+        mode: UInt32? = nil
     ) {
         self.name = name
         self.isDirectory = isDirectory
@@ -33,6 +38,7 @@ public struct FileItem: Identifiable, Sendable, Equatable {
         self.modified = modified
         self.permissions = permissions
         self.owner = owner
+        self.mode = mode
     }
 
     /// Build from an SFTP listing entry.
@@ -44,6 +50,8 @@ public struct FileItem: Identifiable, Sendable, Equatable {
         self.size = attrs.size
         self.modified = attrs.modifyTime
         self.permissions = attrs.permissionString
+        // Only the low nine bits; the file-type bits are not part of a mode.
+        self.mode = attrs.flags.contains(.permissions) ? attrs.permissions & 0o777 : nil
         // `longname` is the server's ls -l line; column 3 is the owner.
         let columns = remote.longname.split(separator: " ", omittingEmptySubsequences: true)
         self.owner = columns.count > 2 ? String(columns[2]) : ""

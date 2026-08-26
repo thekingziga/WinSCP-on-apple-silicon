@@ -184,6 +184,68 @@ public struct SFTPFileAttributes: Sendable, Equatable {
         }
         return out
     }
+
+    /// Parse a permission mode the way `chmod` accepts it: three or four octal
+    /// digits (`644`, `0644`), or a nine-character `rwxr-xr-x` string as
+    /// rendered by `renderPermissions`. Returns nil on anything else, so a
+    /// caller can reject bad input rather than silently applying a wrong mode.
+    ///
+    /// The inverse of `renderPermissions`, and kept beside it: a dialog that
+    /// shows a mode has to read one back, and splitting the pair across layers
+    /// is how they drift.
+    public static func parsePermissions(_ text: String) -> UInt32? {
+        let trimmed = text.trimmingASCIIWhitespace()
+        guard !trimmed.isEmpty else { return nil }
+
+        if trimmed.allSatisfy({ $0.isASCIIOctalDigit }) {
+            // Four digits allows a leading zero (`0644`); more cannot be a
+            // plain permission mode. Setuid and friends are out of scope —
+            // SETSTAT here only ever carries the low nine bits.
+            guard trimmed.count <= 4 else { return nil }
+            var mode: UInt32 = 0
+            for character in trimmed {
+                mode = mode << 3 | UInt32(character.asciiValue! - 48)
+            }
+            guard mode <= 0o777 else { return nil }
+            return mode
+        }
+
+        guard trimmed.count == 9 else { return nil }
+        var mode: UInt32 = 0
+        // Three triads of r/w/x, each position either its letter or '-'.
+        let expected: [Character] = ["r", "w", "x"]
+        for (index, character) in trimmed.enumerated() {
+            let bit = expected[index % 3]
+            if character == bit {
+                mode |= 1 << UInt32(8 - index)
+            } else if character != "-" {
+                return nil
+            }
+        }
+        return mode
+    }
+}
+
+private extension Character {
+    var isASCIIOctalDigit: Bool {
+        guard let value = asciiValue else { return false }
+        return value >= 48 && value <= 55
+    }
+}
+
+private extension String {
+    /// Foundation's `trimmingCharacters` is unavailable in this file — the
+    /// codec is deliberately stdlib-only so it stays testable without an SDK.
+    func trimmingASCIIWhitespace() -> String {
+        var characters = Substring(self)
+        while let first = characters.first, first == " " || first == "\t" {
+            characters = characters.dropFirst()
+        }
+        while let last = characters.last, last == " " || last == "\t" {
+            characters = characters.dropLast()
+        }
+        return String(characters)
+    }
 }
 
 extension SFTPAttributeFlags: Equatable {}

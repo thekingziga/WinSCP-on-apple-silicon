@@ -66,13 +66,13 @@ has a practical payoff described below.
 ## Status
 
 Builds clean, launches, and transfers files against a real SFTP server.
-**245 checks passing.**
+**284 checks passing.**
 
 | Component | State |
 |---|---|
-| SFTP codec (framing, attributes, glob) | 67 checks |
-| Session model, masks, local FS | 60 checks |
-| SSH transport + client engine | 118 checks against live OpenSSH |
+| SFTP codec (framing, attributes, glob) | 88 checks |
+| Session model, masks, local FS | 69 checks |
+| SSH transport + client engine | 127 checks against live OpenSSH |
 | `AppModel` (what the views are bound to) | covered by the live suite |
 | SwiftUI views themselves | render only — **no automated UI interaction** |
 | Directory (recursive) transfers | Implemented — symlinks skipped, not followed |
@@ -81,6 +81,7 @@ Builds clean, launches, and transfers files against a real SFTP server.
 | Resume interrupted transfers | Implemented, both directions |
 | Overwrite protection | Implemented — conflicts wait for overwrite / resume / skip |
 | Reconnect and resume on connection loss | Implemented |
+| Rename, delete, chmod on both panes | Implemented — covered in the live suite |
 | Transfer pipelining | 16 requests in flight |
 | Password-only authentication | Not supported — key/agent only |
 | FTP / FTPS / S3 / WebDAV | Not implemented — SFTP only |
@@ -109,8 +110,8 @@ cannot work without full Xcode. The suite is therefore a plain executable with
 its own assertions:
 
 ```bash
-swift run MacSCPTests     # 60 checks — codec bridge, masks, sessions, local FS
-./Scripts/verify-codec.sh # 67 checks — compiles without Foundation at all
+swift run MacSCPTests     # 69 checks — codec bridge, masks, sessions, local FS
+./Scripts/verify-codec.sh # 88 checks — compiles without Foundation at all
 ```
 
 The second script exists because it survives a broken SDK. This machine's CLT
@@ -129,14 +130,15 @@ And against a real server — this one needs a host you can already `ssh` into:
 swift run MacSCPLiveTest user@host [port] [ssh options...]
 ```
 
-118 checks in two halves. First the engine directly: connect, REALPATH,
+127 checks in two halves. First the engine directly: connect, REALPATH,
 MKDIR/LIST/STAT, text and binary round-trips, non-ASCII filenames, RENAME,
 SETSTAT, recursive upload/download/delete, symlink skipping, and error mapping.
 Then `AppModel` — the object the SwiftUI views bind to — driven the way the UI
 drives it: set a pane selection, call `uploadSelected()`, check the other pane
 refreshed itself. Rename is covered on both sides, including that the pane
 selection follows the new name — a stale selection would leave the toolbar's
-rename and delete buttons enabled over a file that no longer exists.
+rename and delete buttons enabled over a file that no longer exists. Permissions
+likewise: the mode is applied, the pane reflects it, and the server agrees.
 
 It also covers the queue: serial execution, cancelling a queued item, failure
 and retry, resume from a partial file in both directions, the `enqueueTransfer`

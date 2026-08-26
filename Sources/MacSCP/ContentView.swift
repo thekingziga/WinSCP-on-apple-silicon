@@ -9,12 +9,21 @@ private struct RenameRequest: Identifiable {
     let oldName: String
 }
 
+/// Same, for the permissions dialog.
+private struct PermissionsRequest: Identifiable {
+    let id = UUID()
+    let side: PaneSide
+    let name: String
+}
+
 struct ContentView: View {
     @EnvironmentObject var model: AppModel
     @State private var newFolderSide: PaneSide?
     @State private var newFolderName = ""
     @State private var renameRequest: RenameRequest?
     @State private var renameNewName = ""
+    @State private var permissionsRequest: PermissionsRequest?
+    @State private var permissionsText = ""
     @State private var confirmDelete: PaneSide?
 
     var body: some View {
@@ -49,6 +58,9 @@ struct ContentView: View {
         }
         .sheet(item: $renameRequest) { req in
             renameSheet(req)
+        }
+        .sheet(item: $permissionsRequest) { req in
+            permissionsSheet(req)
         }
         .alert("Delete selected files?", isPresented: Binding(
             get: { confirmDelete != nil },
@@ -230,6 +242,14 @@ struct ContentView: View {
             .help("Rename selected file")
 
             Button {
+                startPermissions()
+            } label: {
+                Label("Permissions", systemImage: "lock")
+            }
+            .disabled(activeSideForSingleSelection == nil)
+            .help("Change permissions on the selected file")
+
+            Button {
                 startDelete()
             } label: {
                 Label("Delete", systemImage: "trash")
@@ -302,6 +322,55 @@ struct ContentView: View {
         .padding(20)
     }
 
+    // MARK: - Permissions sheet
+
+    private func permissionsSheet(_ req: PermissionsRequest) -> some View {
+        // Parsing as the user types drives both the preview and the button, so
+        // an unparseable mode can never reach the model.
+        let parsed = LocalFileSystem.parsePermissions(permissionsText)
+
+        return VStack(alignment: .leading, spacing: 14) {
+            Text("Permissions for \(req.side == .local ? "local" : "remote") item")
+                .font(.headline)
+
+            Text(req.name)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+
+            TextField("Mode (644 or rw-r--r--)", text: $permissionsText)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 280)
+
+            Group {
+                if let parsed {
+                    Text(String(format: "%03o", parsed)
+                         + "  " + LocalFileSystem.permissionString(parsed))
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Enter an octal mode such as 644, or rw-r--r--.")
+                        .foregroundStyle(.red)
+                }
+            }
+            .font(.system(.caption, design: .monospaced))
+
+            HStack {
+                Spacer()
+                Button("Cancel") { permissionsRequest = nil }
+                    .keyboardShortcut(.cancelAction)
+                Button("Apply") {
+                    guard let mode = parsed else { return }
+                    let side = req.side
+                    let name = req.name
+                    permissionsRequest = nil
+                    Task { await model.setPermissions(on: side, name: name, mode: mode) }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(parsed == nil)
+            }
+        }
+        .padding(20)
+    }
+
     // MARK: - Selection helpers
 
     /// The side that has exactly one item selected, preferring whichever pane
@@ -324,6 +393,18 @@ struct ContentView: View {
         let name = (side == .local ? model.localSelection : model.remoteSelection).first!
         renameNewName = name
         renameRequest = RenameRequest(side: side, oldName: name)
+    }
+
+    private func startPermissions() {
+        guard let side = activeSideForSingleSelection else { return }
+        let selection = side == .local ? model.localSelection : model.remoteSelection
+        guard let name = selection.first else { return }
+        // Prefill with the mode the pane is already showing, so the dialog opens
+        // on the current value rather than an empty field.
+        let items = side == .local ? model.localItems : model.remoteItems
+        let current = items.first { $0.name == name }?.mode
+        permissionsText = current.map { String(format: "%03o", $0) } ?? ""
+        permissionsRequest = PermissionsRequest(side: side, name: name)
     }
 
     private func startDelete() {

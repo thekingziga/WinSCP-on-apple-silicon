@@ -1,4 +1,5 @@
 import Foundation
+import SFTPKit
 
 /// Local-side backend for the left pane.
 public enum LocalFileSystem {
@@ -25,7 +26,8 @@ public enum LocalFileSystem {
                 size: UInt64(values?.fileSize ?? 0),
                 modified: values?.contentModificationDate,
                 permissions: posix.map { permissionString(UInt32(truncating: $0)) } ?? "",
-                owner: ""
+                owner: "",
+                mode: posix.map { UInt32(truncating: $0) & 0o777 }
             )
         }
         .sorted(by: FileItem.defaultSort)
@@ -39,9 +41,23 @@ public enum LocalFileSystem {
         try FileManager.default.removeItem(at: url)
     }
 
+    public static func setPermissions(at url: URL, mode: UInt32) throws {
+        try FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: mode & 0o777)], ofItemAtPath: url.path)
+    }
+
     public static func rename(at url: URL, to newName: String) throws {
         let destination = url.deletingLastPathComponent().appendingPathComponent(newName)
         try FileManager.default.moveItem(at: url, to: destination)
+    }
+
+    /// Accepts `644`, `0644`, or `rw-r--r--`; nil when the text is not a mode.
+    ///
+    /// Re-exposed from the codec for the same reason `permissionString` is:
+    /// the views depend on CoreKit, not SFTPKit, and both panes must agree on
+    /// what a permission mode looks like.
+    public static func parsePermissions(_ text: String) -> UInt32? {
+        SFTPFileAttributes.parsePermissions(text)
     }
 
     /// Same `rwxr-xr-x` rendering the remote side uses, so both panes agree.
