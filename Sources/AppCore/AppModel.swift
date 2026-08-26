@@ -344,6 +344,11 @@ public final class AppModel: ObservableObject {
             do {
                 try LocalFileSystem.rename(at: localURL.appendingPathComponent(oldName),
                                            to: newName)
+                // Carry the selection across, or it would still name a file
+                // that no longer exists — leaving the toolbar's rename and
+                // delete buttons enabled and pointed at nothing.
+                localSelection.remove(oldName)
+                localSelection.insert(newName)
                 note("Renamed local \(oldName) → \(newName)")
             } catch {
                 fail("Rename \(oldName): \(error.localizedDescription)")
@@ -354,6 +359,8 @@ public final class AppModel: ObservableObject {
             do {
                 try await client.rename(from: joinRemote(remotePath, oldName),
                                         to: joinRemote(remotePath, newName))
+                remoteSelection.remove(oldName)
+                remoteSelection.insert(newName)
                 note("Renamed remote \(oldName) → \(newName)")
             } catch {
                 fail("Rename \(oldName): \(errorText(error))")

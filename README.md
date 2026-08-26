@@ -66,13 +66,13 @@ has a practical payoff described below.
 ## Status
 
 Builds clean, launches, and transfers files against a real SFTP server.
-**234 checks passing.**
+**245 checks passing.**
 
 | Component | State |
 |---|---|
 | SFTP codec (framing, attributes, glob) | 67 checks |
 | Session model, masks, local FS | 60 checks |
-| SSH transport + client engine | 107 checks against live OpenSSH |
+| SSH transport + client engine | 118 checks against live OpenSSH |
 | `AppModel` (what the views are bound to) | covered by the live suite |
 | SwiftUI views themselves | render only — **no automated UI interaction** |
 | Directory (recursive) transfers | Implemented — symlinks skipped, not followed |
@@ -129,12 +129,14 @@ And against a real server — this one needs a host you can already `ssh` into:
 swift run MacSCPLiveTest user@host [port] [ssh options...]
 ```
 
-107 checks in two halves. First the engine directly: connect, REALPATH,
+118 checks in two halves. First the engine directly: connect, REALPATH,
 MKDIR/LIST/STAT, text and binary round-trips, non-ASCII filenames, RENAME,
 SETSTAT, recursive upload/download/delete, symlink skipping, and error mapping.
 Then `AppModel` — the object the SwiftUI views bind to — driven the way the UI
 drives it: set a pane selection, call `uploadSelected()`, check the other pane
-refreshed itself.
+refreshed itself. Rename is covered on both sides, including that the pane
+selection follows the new name — a stale selection would leave the toolbar's
+rename and delete buttons enabled over a file that no longer exists.
 
 It also covers the queue: serial execution, cancelling a queued item, failure
 and retry, resume from a partial file in both directions, the `enqueueTransfer`

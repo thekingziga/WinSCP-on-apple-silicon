@@ -346,6 +346,48 @@ do {
     expect(folderGone, "non-empty remote folder deleted through the model")
     expect(model.remoteSelection.isEmpty, "selection cleared after delete")
 
+    section("AppModel: rename on both sides")
+    // The engine's RENAME is covered above; this drives AppModel.renameItem,
+    // which is where the local branch resolves a *name* against the pane's
+    // directory rather than taking a second URL.
+    try "rename me\n".write(to: appLocal.appendingPathComponent("before.txt"),
+                            atomically: true, encoding: .utf8)
+    model.refreshLocal()
+    model.localSelection = ["before.txt"]
+    await model.renameItem(on: .local, oldName: "before.txt", newName: "after.txt")
+    expect(model.localItems.contains { $0.name == "after.txt" },
+           "local pane shows the new name")
+    expect(!model.localItems.contains { $0.name == "before.txt" },
+           "old local name is gone")
+    expectEqual(try? String(contentsOf: appLocal.appendingPathComponent("after.txt"),
+                            encoding: .utf8),
+                "rename me\n", "local rename moved the file, not its contents")
+    // A stale selection would leave the toolbar enabled on a missing file.
+    expectEqual(model.localSelection, ["after.txt"], "local selection followed the rename")
+
+    try await client.makeDirectory(appRemote + "/r-before")
+    await model.refreshRemote()
+    model.remoteSelection = ["r-before"]
+    await model.renameItem(on: .remote, oldName: "r-before", newName: "r-after")
+    expect(model.remoteItems.contains { $0.name == "r-after" },
+           "remote pane shows the new name")
+    expect(!model.remoteItems.contains { $0.name == "r-before" },
+           "old remote name is gone")
+    expectEqual(model.remoteSelection, ["r-after"], "remote selection followed the rename")
+    try await client.removeDirectory(appRemote + "/r-after")
+
+    section("AppModel: rename rejects no-ops and reports failure")
+    let logBefore = model.log.count
+    await model.renameItem(on: .local, oldName: "after.txt", newName: "after.txt")
+    await model.renameItem(on: .local, oldName: "after.txt", newName: "")
+    expectEqual(model.log.count, logBefore, "identical and empty names are ignored silently")
+    expect(model.localItems.contains { $0.name == "after.txt" }, "file untouched by the no-ops")
+
+    await model.renameItem(on: .local, oldName: "nosuchfile.txt", newName: "wishful.txt")
+    expect(model.log.last?.isError == true, "failed local rename logged as an error")
+    await model.renameItem(on: .remote, oldName: "nosuchfile.txt", newName: "wishful.txt")
+    expect(model.log.last?.isError == true, "failed remote rename logged as an error")
+
     section("AppModel: session persistence")
     model.saveSession(appSession)
     expectEqual(SessionStore(url: storeURL).load().count, 1, "session saved to the injected store")
